@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::slice;
+use std::{ptr, slice};
 
 struct StackMapParser<'a> {
     data: &'a[u8],
@@ -227,14 +227,26 @@ impl SMQuery {
 }
 
 #[no_mangle]
-pub extern "C" fn __yk_stopgap(addr: *mut c_void, size: usize, retaddr: usize) {
+pub extern "C" fn __yk_stopgap(addr: *mut c_void, size: usize, retaddr: usize, rsp: usize) {
     // Read stackmap here?
     // Then init stopgap interp, basically never returning to the llvm_deopt call?
     println!("stopgap! {:?} {}", addr as *mut u8, size);
     let slice = unsafe { slice::from_raw_parts(addr as *mut u8, size) };
     let smq = StackMapParser::parse(slice).unwrap();
     println!("ret addr: {:x}", retaddr);
+    println!("rsp addr: {:x}", rsp);
     let locs = smq.get_locations((retaddr as usize).try_into().unwrap()).unwrap();
+    for l in locs {
+        match l {
+            Location::Direct(reg, off) => {
+                assert_eq(reg, 7); // only on x64
+                println!("Direct: {} {}", reg, off);
+                let v = unsafe { ptr::read::<u8>((rsp + (*off as usize) + 16) as *mut u8) };
+                println!("value {}", v);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
