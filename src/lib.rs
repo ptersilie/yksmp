@@ -226,25 +226,83 @@ impl SMQuery {
     }
 }
 
+struct Registers {
+    rax: usize,
+    rdx: usize,
+    rcx: usize,
+    rbx: usize,
+    rsi: usize,
+    rdi: usize,
+    rsp: usize,
+}
+
+impl Registers {
+
+    fn from_ptr(ptr: *const c_void) -> Registers {
+        Registers {
+            rax: Registers::read_from_stack(ptr, 0),
+            rdx: Registers::read_from_stack(ptr, 1),
+            rcx: Registers::read_from_stack(ptr, 2),
+            rbx: Registers::read_from_stack(ptr, 3),
+            rsi: Registers::read_from_stack(ptr, 4),
+            rdi: Registers::read_from_stack(ptr, 5),
+            rsp: Registers::read_from_stack(ptr, 6),
+        }
+    }
+
+    fn read_from_stack(rsp: *const c_void, off: isize) -> usize {
+        unsafe {
+            let ptr = rsp as *const usize;
+            println!("readfromstack: {:?} {} {:?}", ptr, off, ptr.offset(off));
+            ptr::read::<usize>(ptr.offset(off))
+        }
+    }
+
+    fn get(&self, id: u16) -> usize {
+        match id {
+            0 => self.rax,
+            1 => self.rdx,
+            2 => self.rcx,
+            3 => self.rbx,
+            4 => self.rsi,
+            5 => self.rdi,
+            6 => unreachable!("We currently have no way to access RBP of the previous stackframe."),
+            7 => self.rsp,
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[no_mangle]
-pub extern "C" fn __yk_stopgap(addr: *mut c_void, size: usize, retaddr: usize, rsp: usize) {
+pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize, rsp: *const c_void) {
     // Read stackmap here?
     // Then init stopgap interp, basically never returning to the llvm_deopt call?
     println!("stopgap! {:?} {}", addr as *mut u8, size);
+    println!("ret addr: {:x}", retaddr);
+    println!("rsp addr: {:?}", rsp);
+
+    let registers = Registers::from_ptr(rsp);
+    println!("registers.rsp: {}", registers.rsp);
+
     let slice = unsafe { slice::from_raw_parts(addr as *mut u8, size) };
     let smq = StackMapParser::parse(slice).unwrap();
-    println!("ret addr: {:x}", retaddr);
-    println!("rsp addr: {:x}", rsp);
-    let locs = smq.get_locations((retaddr as usize).try_into().unwrap()).unwrap();
+    let locs = smq.get_locations(retaddr.try_into().unwrap()).unwrap();
     for l in locs {
         match l {
             Location::Direct(reg, off) => {
-                assert_eq(reg, 7); // only on x64
-                println!("Direct: {} {}", reg, off);
-                let v = unsafe { ptr::read::<u8>((rsp + (*off as usize) + 16) as *mut u8) };
-                println!("value {}", v);
+                // A direct location should always be in relation to RSP.
+                assert_eq!(*reg, 7);
+                // We need to add 2 bytes to the value of RSP to factor in the return address and
+                // the pushed RBP value of the previous frame.
+                // FIXME: Only on x64. Other architectures need different values.
+                let addr = registers.get(*reg) + (*off as usize) + 16;
+                let v = unsafe { ptr::read::<u8>((registers.get(*reg) + (*off as usize) + 16) as *mut u8) };
+                println!("Direct: {}", v);
             }
-            _ => {}
+            Location::Constant(v) => {
+                println!("Constant: {}", v);
+            }
+            _ => todo!()
         }
     }
 }
