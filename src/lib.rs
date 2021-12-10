@@ -62,8 +62,6 @@ impl StackMapParser<'_> {
         let num_consts = self.read_u32();
         let num_recs = self.read_u32();
 
-        println!("{} {} {}", num_funcs, num_consts, num_recs);
-
         let funcs = self.read_functions(num_funcs);
         let consts = self.read_consts(num_consts);
 
@@ -75,7 +73,6 @@ impl StackMapParser<'_> {
             let records = self.read_records(f.record_count);
             for r in records {
                 let key = f.addr + u64::from(r.offset);
-                println!("key: {:x}", key);
                 map.insert(key, r);
             }
         }
@@ -131,8 +128,6 @@ impl StackMapParser<'_> {
             let size = self.read_u16();
             let dwreg = self.read_u16();
             self.read_u16();
-            println!("kind: {}", kind); 
-            println!("dwreg: {}", dwreg); 
 
             let location = match kind {
                 0x01 => {
@@ -141,22 +136,18 @@ impl StackMapParser<'_> {
                 },
                 0x02 => {
                     let offset = self.read_u32();
-                    println!("offset: {}", offset); 
                     Location::Direct(dwreg, offset)
                 },
                 0x03 => {
                     let offset = self.read_u32();
-            println!("offset: {}", offset); 
                     Location::Indirect(dwreg, offset)
                 },
                 0x04 => {
                     let offset = self.read_i32();
-            println!("offset: {}", offset); 
                     Location::Constant(offset)
                 },
                 0x05 => {
                     let offset = self.read_u32();
-            println!("offset: {}", offset); 
                     Location::ConstIndex(offset)
                 },
                 _ => unreachable!(),
@@ -253,7 +244,6 @@ impl Registers {
     fn read_from_stack(rsp: *const c_void, off: isize) -> usize {
         unsafe {
             let ptr = rsp as *const usize;
-            println!("readfromstack: {:?} {} {:?}", ptr, off, ptr.offset(off));
             ptr::read::<usize>(ptr.offset(off))
         }
     }
