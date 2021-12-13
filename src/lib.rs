@@ -1,8 +1,8 @@
-use std::convert::TryInto;
 use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::ffi::c_void;
 use std::{ptr, slice};
-use std::convert::TryFrom;
 
 /// Parses LLVM stackmaps version 3 from a given address. Provides a way to query relevant
 /// locations given the return address of a `__llvm_deoptimize` function.
@@ -10,7 +10,7 @@ use std::convert::TryFrom;
 /// others we will need to either make this parser more dynamic or create a new one for each
 /// architecture.
 struct StackMapParser<'a> {
-    data: &'a[u8],
+    data: &'a [u8],
     offset: usize,
 }
 
@@ -41,10 +41,7 @@ struct LiveOut {
 
 impl StackMapParser<'_> {
     pub fn parse(data: &[u8]) -> Result<SMQuery, &'static str> {
-        let mut smp = StackMapParser {
-            data,
-            offset: 0,
-        };
+        let mut smp = StackMapParser { data, offset: 0 };
         smp.read()
     }
 
@@ -68,7 +65,10 @@ impl StackMapParser<'_> {
         let mut map = HashMap::new();
 
         // Check that the records match the sum of the expected records per function.
-        assert_eq!(funcs.iter().map(|f| f.record_count).sum::<u64>(), u64::from(num_recs));
+        assert_eq!(
+            funcs.iter().map(|f| f.record_count).sum::<u64>(),
+            u64::from(num_recs)
+        );
 
         // Parse records.
         for f in funcs {
@@ -116,7 +116,11 @@ impl StackMapParser<'_> {
             let num_liveouts = self.read_u16();
             let liveouts = self.read_liveouts(num_liveouts);
             self.align_8();
-            v.push(Record{ offset, locs, liveouts });
+            v.push(Record {
+                offset,
+                locs,
+                liveouts,
+            });
         }
         v
     }
@@ -134,23 +138,23 @@ impl StackMapParser<'_> {
                 0x01 => {
                     self.read_u32();
                     Location::Register(dwreg)
-                },
+                }
                 0x02 => {
                     let offset = self.read_u32();
                     Location::Direct(dwreg, offset)
-                },
+                }
                 0x03 => {
                     let offset = self.read_u32();
                     Location::Indirect(dwreg, offset)
-                },
+                }
                 0x04 => {
                     let offset = self.read_i32();
                     Location::Constant(offset)
-                },
+                }
                 0x05 => {
                     let offset = self.read_u32();
                     Location::LargeConstant(consts[usize::try_from(offset).unwrap()])
-                },
+                }
                 _ => unreachable!(),
             };
 
@@ -164,7 +168,7 @@ impl StackMapParser<'_> {
         for _ in 0..num {
             let dwreg = self.read_u16();
             let size = self.read_u8();
-            v.push(LiveOut{ dwreg, size});
+            v.push(LiveOut { dwreg, size });
         }
         v
     }
@@ -174,39 +178,39 @@ impl StackMapParser<'_> {
     }
 
     fn read_u8(&mut self) -> u8 {
-        let d = u8::from_ne_bytes(self.data[self.offset..self.offset+1].try_into().unwrap());
+        let d = u8::from_ne_bytes(self.data[self.offset..self.offset + 1].try_into().unwrap());
         self.offset += 1;
         d
     }
 
     fn read_u16(&mut self) -> u16 {
-        let d = u16::from_ne_bytes(self.data[self.offset..self.offset+2].try_into().unwrap());
+        let d = u16::from_ne_bytes(self.data[self.offset..self.offset + 2].try_into().unwrap());
         self.offset += 2;
         d
     }
 
     fn read_u32(&mut self) -> u32 {
-        let d = u32::from_ne_bytes(self.data[self.offset..self.offset+4].try_into().unwrap());
+        let d = u32::from_ne_bytes(self.data[self.offset..self.offset + 4].try_into().unwrap());
         self.offset += 4;
         d
     }
 
     fn read_i32(&mut self) -> i32 {
-        let d = i32::from_ne_bytes(self.data[self.offset..self.offset+4].try_into().unwrap());
+        let d = i32::from_ne_bytes(self.data[self.offset..self.offset + 4].try_into().unwrap());
         self.offset += 4;
         d
     }
 
     fn read_u64(&mut self) -> u64 {
-        let d = u64::from_ne_bytes(self.data[self.offset..self.offset+8].try_into().unwrap());
+        let d = u64::from_ne_bytes(self.data[self.offset..self.offset + 8].try_into().unwrap());
         self.offset += 8;
         d
     }
 }
 
 /// Maps stackmap records to the addresses where they are relevant. Allows users to retrieve the
-/// appropriate record during deoptimisation. 
-pub struct SMQuery {
+/// appropriate record during deoptimisation.
+struct SMQuery {
     map: HashMap<u64, Record>,
 }
 
@@ -236,7 +240,6 @@ struct Registers {
 }
 
 impl Registers {
-
     fn from_ptr(ptr: *const c_void) -> Registers {
         Registers {
             rax: Registers::read_from_stack(ptr, 0),
@@ -272,7 +275,12 @@ impl Registers {
 }
 
 #[no_mangle]
-pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize, rsp: *const c_void) {
+pub extern "C" fn __yk_stopgap(
+    addr: *const c_void,
+    size: usize,
+    retaddr: usize,
+    rsp: *const c_void,
+) {
     // Restore saved registers from the stack.
     let registers = Registers::from_ptr(rsp);
 
@@ -297,7 +305,7 @@ pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize,
             Location::Constant(v) => {
                 println!("Constant: {}", v);
             }
-            _ => todo!()
+            _ => todo!(),
         }
     }
 }
@@ -305,7 +313,7 @@ pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize,
 #[cfg(test)]
 mod test {
 
-    use super::{StackMapParser, Location};
+    use super::{Location, StackMapParser};
     use std::fs::File;
     use std::io::{Cursor, Read};
 
@@ -326,5 +334,5 @@ mod test {
         assert!(matches!(iter.next().unwrap(), Location::Direct(7, 28)));
         assert!(matches!(iter.next().unwrap(), Location::Direct(7, 24)));
         assert!(matches!(iter.next().unwrap(), Location::Direct(7, 20)));
-    } 
+    }
 }
