@@ -2,7 +2,13 @@ use std::convert::TryInto;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::{ptr, slice};
+use std::convert::TryFrom;
 
+/// Parses LLVM stackmaps version 3 from a given address. Provides a way to query relevant
+/// locations given the return address of a `__llvm_deoptimize` function.
+/// Note that LLVM currently only supports stackmaps for 64 bit architectures. Once they support
+/// others we will need to either make this parser more dynamic or create a new one for each
+/// architecture.
 struct StackMapParser<'a> {
     data: &'a[u8],
     offset: usize,
@@ -10,12 +16,10 @@ struct StackMapParser<'a> {
 
 struct Function {
     addr: u64,
-    stack_size: u64,
     record_count: u64,
 }
 
 struct Record {
-    id: u64,
     offset: u32,
     locs: Vec<Location>,
     liveouts: Vec<LiveOut>,
@@ -26,14 +30,10 @@ enum Location {
     Direct(u16, u32),
     Indirect(u16, u32),
     Constant(i32),
-    ConstIndex(u32),
+    LargeConstant(u64),
 }
 
-enum LocOffset {
-    Off(u32),
-    Const(i32),
-}
-
+#[allow(dead_code)]
 struct LiveOut {
     dwreg: u16,
     size: u8,
@@ -69,8 +69,10 @@ impl StackMapParser<'_> {
 
         // Check that the records match the sum of the expected records per function.
         assert_eq!(funcs.iter().map(|f| f.record_count).sum::<u64>(), u64::from(num_recs));
+
+        // Parse records.
         for f in funcs {
-            let records = self.read_records(f.record_count);
+            let records = self.read_records(f.record_count, &consts);
             for r in records {
                 let key = f.addr + u64::from(r.offset);
                 map.insert(key, r);
@@ -85,9 +87,9 @@ impl StackMapParser<'_> {
         for _ in 0..num {
             let addr = self.read_u64();
             println!("f: {:x}", addr);
-            let stack_size = self.read_u64();
+            let _stack_size = self.read_u64();
             let record_count = self.read_u64();
-            v.push(Function { addr, stack_size, record_count });
+            v.push(Function { addr, record_count });
         }
         v
     }
@@ -100,32 +102,31 @@ impl StackMapParser<'_> {
         v
     }
 
-    fn read_records(&mut self, num: u64) -> Vec<Record> {
+    fn read_records(&mut self, num: u64, consts: &Vec<u64>) -> Vec<Record> {
         let mut v = Vec::new();
         for _ in 0..num {
-            let id = self.read_u64();
+            let _id = self.read_u64();
             let offset = self.read_u32();
-            println!("{} {}", id, offset);
             self.read_u16();
             let num_locs = self.read_u16();
-            let locs = self.read_locations(num_locs);
+            let locs = self.read_locations(num_locs, consts);
             // Padding
             self.align_8();
             self.read_u16();
             let num_liveouts = self.read_u16();
             let liveouts = self.read_liveouts(num_liveouts);
             self.align_8();
-            v.push(Record{ id, offset, locs, liveouts });
+            v.push(Record{ offset, locs, liveouts });
         }
         v
     }
 
-    fn read_locations(&mut self, num: u16) -> Vec<Location> {
+    fn read_locations(&mut self, num: u16, consts: &Vec<u64>) -> Vec<Location> {
         let mut v = Vec::new();
         for _ in 0..num {
             let kind = self.read_u8();
             self.read_u8();
-            let size = self.read_u16();
+            let _size = self.read_u16();
             let dwreg = self.read_u16();
             self.read_u16();
 
@@ -148,7 +149,7 @@ impl StackMapParser<'_> {
                 },
                 0x05 => {
                     let offset = self.read_u32();
-                    Location::ConstIndex(offset)
+                    Location::LargeConstant(consts[usize::try_from(offset).unwrap()])
                 },
                 _ => unreachable!(),
             };
@@ -203,13 +204,20 @@ impl StackMapParser<'_> {
     }
 }
 
-struct SMQuery {
+/// Maps stackmap records to the addresses where they are relevant. Allows users to retrieve the
+/// appropriate record during deoptimisation. 
+pub struct SMQuery {
     map: HashMap<u64, Record>,
 }
 
 impl SMQuery {
-    fn get_record(&self, addr: u64) -> Option<&Record> {
+    fn _get_record(&self, addr: u64) -> Option<&Record> {
         self.map.get(&addr)
+    }
+
+    #[allow(dead_code)]
+    fn get_liveout(&self, addr: u64) -> Option<&Vec<LiveOut>> {
+        self.map.get(&addr).map(|r| &r.liveouts)
     }
 
     fn get_locations(&self, addr: u64) -> Option<&Vec<Location>> {
@@ -265,18 +273,16 @@ impl Registers {
 
 #[no_mangle]
 pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize, rsp: *const c_void) {
-    // Read stackmap here?
-    // Then init stopgap interp, basically never returning to the llvm_deopt call?
-    println!("stopgap! {:?} {}", addr as *mut u8, size);
-    println!("ret addr: {:x}", retaddr);
-    println!("rsp addr: {:?}", rsp);
-
+    // Restore saved registers from the stack.
     let registers = Registers::from_ptr(rsp);
-    println!("registers.rsp: {}", registers.rsp);
 
+    // Parse the stackmap.
     let slice = unsafe { slice::from_raw_parts(addr as *mut u8, size) };
     let smq = StackMapParser::parse(slice).unwrap();
     let locs = smq.get_locations(retaddr.try_into().unwrap()).unwrap();
+
+    // Extract live values from the stackmap.
+    // FIXME: Until we have a stopgap interpreter we simply print the values.
     for l in locs {
         match l {
             Location::Direct(reg, off) => {
@@ -284,9 +290,8 @@ pub extern "C" fn __yk_stopgap(addr: *const c_void, size: usize, retaddr: usize,
                 assert_eq!(*reg, 7);
                 // We need to add 2 bytes to the value of RSP to factor in the return address and
                 // the pushed RBP value of the previous frame.
-                // FIXME: Only on x64. Other architectures need different values.
                 let addr = registers.get(*reg) + (*off as usize) + 16;
-                let v = unsafe { ptr::read::<u8>((registers.get(*reg) + (*off as usize) + 16) as *mut u8) };
+                let v = unsafe { ptr::read::<u8>(addr as *mut u8) };
                 println!("Direct: {}", v);
             }
             Location::Constant(v) => {
