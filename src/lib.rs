@@ -318,9 +318,9 @@ pub extern "C" fn __yk_stopgap(
 mod test {
 
     use super::{Location, StackMapParser};
-    use std::fs;
     use object::{Object, ObjectSection};
     use std::env;
+    use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -330,10 +330,7 @@ mod test {
         src.push("tests");
         env::set_current_dir(&src).unwrap();
 
-        let res = Command::new("make")
-                          .arg(target)
-                          .output()
-                          .unwrap();
+        let res = Command::new("make").arg(target).output().unwrap();
         if !res.status.success() {
             eprintln!("Building test input failed: {:?}", res);
             panic!();
