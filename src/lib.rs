@@ -25,11 +25,12 @@ struct Record {
     liveouts: Vec<LiveOut>,
 }
 
+#[derive(Debug)]
 enum Location {
     Register(u16),
-    Direct(u16, u32),
-    Indirect(u16, u32),
-    Constant(i32),
+    Direct(u16, i32),
+    Indirect(u16, i32),
+    Constant(u32),
     LargeConstant(u64),
 }
 
@@ -136,23 +137,23 @@ impl StackMapParser<'_> {
 
             let location = match kind {
                 0x01 => {
-                    self.read_u32();
+                    self.read_i32();
                     Location::Register(dwreg)
                 }
                 0x02 => {
-                    let offset = self.read_u32();
+                    let offset = self.read_i32();
                     Location::Direct(dwreg, offset)
                 }
                 0x03 => {
-                    let offset = self.read_u32();
+                    let offset = self.read_i32();
                     Location::Indirect(dwreg, offset)
                 }
                 0x04 => {
-                    let offset = self.read_i32();
+                    let offset = self.read_u32();
                     Location::Constant(offset)
                 }
                 0x05 => {
-                    let offset = self.read_u32();
+                    let offset = self.read_i32();
                     Location::LargeConstant(consts[usize::try_from(offset).unwrap()])
                 }
                 _ => unreachable!(),
@@ -215,7 +216,8 @@ struct SMQuery {
 }
 
 impl SMQuery {
-    fn _get_record(&self, addr: u64) -> Option<&Record> {
+    #[allow(dead_code)]
+    fn get_record(&self, addr: u64) -> Option<&Record> {
         self.map.get(&addr)
     }
 
@@ -224,6 +226,7 @@ impl SMQuery {
         self.map.get(&addr).map(|r| &r.liveouts)
     }
 
+    /// Get all locations given the return address of a __llvm_deoptimize function.
     fn get_locations(&self, addr: u64) -> Option<&Vec<Location>> {
         self.map.get(&addr).map(|r| &r.locs)
     }
@@ -294,7 +297,8 @@ pub extern "C" fn __yk_stopgap(
     for l in locs {
         match l {
             Location::Direct(reg, off) => {
-                // A direct location should always be in relation to RSP.
+                // When using `llvm.experimental.deoptimize` then direct locations should always be
+                // in relation to RSP.
                 assert_eq!(*reg, 7);
                 // We need to add 2 bytes to the value of RSP to factor in the return address and
                 // the pushed RBP value of the previous frame.
@@ -314,25 +318,61 @@ pub extern "C" fn __yk_stopgap(
 mod test {
 
     use super::{Location, StackMapParser};
-    use std::fs::File;
-    use std::io::{Cursor, Read};
+    use std::fs;
+    use object::{Object, ObjectSection};
+    use std::env;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn build_test(target: &str) {
+        let md = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let mut src = PathBuf::from(md);
+        src.push("tests");
+        env::set_current_dir(&src).unwrap();
+
+        let res = Command::new("make")
+                          .arg(target)
+                          .output()
+                          .unwrap();
+        if !res.status.success() {
+            eprintln!("Building test input failed: {:?}", res);
+            panic!();
+        }
+    }
+
+    fn load_bin(target: &str) -> Vec<u8> {
+        build_test(target);
+        let md = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let mut src = PathBuf::from(md);
+        src.push("tests");
+        src.push(target);
+        fs::read(src).unwrap()
+    }
 
     #[test]
-    fn test_basic() {
-        let mut file = File::open("stackmap.dump").unwrap();
-        let mut data = Vec::new();
-        file.read_to_end(&mut data);
-        let smq = StackMapParser::parse(data.as_slice()).unwrap();
-        let faddr = 0x7f0c6bb32050;
-        let off = 113;
-        let locs = smq.get_locations(faddr + off);
-        assert!(locs.is_some());
-        let mut iter = locs.unwrap().iter();
-        assert!(matches!(iter.next().unwrap(), Location::Constant(0)));
-        assert!(matches!(iter.next().unwrap(), Location::Constant(0)));
-        assert!(matches!(iter.next().unwrap(), Location::Constant(3)));
-        assert!(matches!(iter.next().unwrap(), Location::Direct(7, 28)));
-        assert!(matches!(iter.next().unwrap(), Location::Direct(7, 24)));
-        assert!(matches!(iter.next().unwrap(), Location::Direct(7, 20)));
+    fn test_simple() {
+        let data = load_bin("simple.o");
+        let objfile = object::File::parse(&*data).unwrap();
+        let smsec = objfile.section_by_name(".llvm_stackmaps").unwrap();
+        let smq = StackMapParser::parse(smsec.data().unwrap()).unwrap();
+        let locs = &smq.map.iter().nth(0).unwrap().1.locs;
+        assert_eq!(locs.len(), 2);
+        assert!(matches!(locs[0], Location::Direct(6, -4)));
+        assert!(matches!(locs[1], Location::Direct(6, -8)));
+    }
+
+    #[test]
+    fn test_deopt() {
+        let data = load_bin("deopt.o");
+        let objfile = object::File::parse(&*data).unwrap();
+        let smsec = objfile.section_by_name(".llvm_stackmaps").unwrap();
+        let smq = StackMapParser::parse(smsec.data().unwrap()).unwrap();
+        let locs = &smq.map.iter().nth(0).unwrap().1.locs;
+        assert_eq!(locs.len(), 5);
+        assert!(matches!(locs[0], Location::Constant(0)));
+        assert!(matches!(locs[1], Location::Constant(0)));
+        assert!(matches!(locs[2], Location::Constant(2)));
+        assert!(matches!(locs[3], Location::Direct(7, 12)));
+        assert!(matches!(locs[4], Location::Direct(7, 8)));
     }
 }
